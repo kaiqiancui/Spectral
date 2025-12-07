@@ -1,0 +1,105 @@
+# ===================================================================
+# .gitignore for Image Generation & Deep Learning Projects
+#
+# Tailored for researchers using Python, PyTorch/TensorFlow, Diffusers,
+# Jupyter Notebooks, and handling large datasets/models.
+# ===================================================================
+
+# >> 1. Generated Outputs (VERY IMPORTANT)
+# Ignore all directories where you save generated images, grids, or videos.
+# This prevents committing thousands of experiment results.
+# /outputs/
+# /results/
+# /samples/
+# /generated/
+# /images/
+# /output/
+
+# >> 2. Datasets and Large Files
+# Datasets should NEVER be tracked by Git. Store them in a separate
+# data server, cloud storage, or use DVC (Data Version Control).
+/datasets/
+/data/
+/raw_data/
+*.zip
+*.tar.gz
+*.rar
+temp
+# >> 3. Model Checkpoints & Weights (CRITICAL)
+# Model files are often GBs in size. Never commit them.
+# Download them on-demand or store them outside the repo.
+/models/
+/checkpoints/
+/weights/
+/saved_models/
+*.pt
+*.pth
+*.bin
+*.ckpt
+*.onnx
+*.safetensors
+
+# >> 4. Python & Environment Files
+# Ignore virtual environment folders, Python caches, and build artifacts.
+/.venv/
+/venv/
+/env/
+/.env
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+/build/
+/dist/
+/downloads/
+/wheels/
+*.whl
+
+# >> 5. Logs, Caches, and Experiment Tracking
+# Ignore logs, profiling data, and caches from various tools.
+# Experiment tracking data (like W&B/TensorBoard) can be large.
+/logs/
+/log/
+/wandb/
+/mlruns/
+/tensorboard/
+*.log
+*.prof
+*.prof.*
+*.out
+.cache/
+/.cache/
+*.torch_compile_cache/
+
+# >> 6. Jupyter Notebook & IDE Configuration
+# Ignore notebook checkpoints and IDE-specific setting files.
+# It's good practice to commit the .ipynb files, but not their checkpoints.
+.ipynb_checkpoints/
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+*.swp
+
+# >> 7. Secrets and Credentials (SECURITY)
+# Never commit API keys, tokens, or other secrets.
+# Use a .env file (which is ignored above) to manage them.
+secrets.yml
+secrets.json
+config.local.yml
+*.pem
+*.key
+*credentials*
+
+# >> 8. Operating System Specific Files
+# Standard OS-generated files.
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+outputs/*
