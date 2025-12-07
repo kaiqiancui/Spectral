@@ -1,25 +1,82 @@
-experiment:
-  name: "baseline_esol"
-  device: "cuda"
-  save_dir: "./logs/baseline"
+# @package _global_
 
+# ----------------------------------------------------------------------------
+# Model Configuration
+# ----------------------------------------------------------------------------
+model:
+  # 指定 Llama 3.1 8B 模型路径 (可以是 HuggingFace ID 或 本地路径)
+  model_name_or_path: "meta-llama/Meta-Llama-3.1-8B"
+  
+  # 是否使用 bfloat16 (Llama 3 强烈建议开启，显存更省且精度更好)
+  use_bf16: true
+  
+  # --- Projector Configuration (复刻原仓库 models.py) ---
+  # 科学特征的原始维度:
+  # - UniMol (Molecule): 通常是 512
+  # - ESM-2 (Protein): 通常是 1280 (取决于具体规模, e.g. esm2_t33_650M_UR50D)
+  science_dim: 512  
+  
+  # LLM 的隐藏层维度 (Llama 3.1 8B 为 4096)
+  llm_dim: 4096
+  
+  # Projector 中间层维度 (通常与 LLM 维度保持一致)
+  projector_hidden_dim: 4096
+  
+  # 训练策略:
+  # true = 冻结 LLM，只训练 Projector (复现原仓库 Stage 1/Adapter Training)
+  # false = 全量微调 (显存开销巨大，通常不建议)
+  freeze_llm: true 
+
+# ----------------------------------------------------------------------------
+# Data & ICRL Configuration (复刻原仓库 embedding_dataset_ICL.py)
+# ----------------------------------------------------------------------------
 data:
-  task_name: "ESOL"
-  modality_type: "single"  # single (分子/蛋白) 或 dual (DTI)
-  # 定义每列数据对应的编码器和缓存文件
-  inputs:
-    - column: "input1"     # 对应 task 返回字典的 key
-      encoder: "unimol"
-      cache_path: "./data/cache/unimol_esol.pkl"
+  # 模态类型: "molecule" 或 "protein" (用于区分处理逻辑)
+  modality: "molecule"
+  
+  # 原始文本数据路径 (JSON/CSV)
+  train_data_path: "data/esol/train.json"
+  test_data_path: "data/esol/test.json"
+  
+  # --- Embedding Paths (关键输入) ---
+  # 必须是预先提取好的 .pt 或 .pkl 文件
+  train_emb_path: "data/esol/train_unimol_embeddings.pt"
+  test_emb_path: "data/esol/test_unimol_embeddings.pt"
+  
+  # --- OT-ICL Retrieval Hyperparameters (原仓库核心逻辑) ---
+  # 1. PCA 降维: 计算 OT 距离前先降维，原仓库默认为 20
+  pca_dim: 20
+  
+  # 2. Optimal Transport 正则化系数 (Sinkhorn reg/epsilon)
+  # 原仓库默认为 0.1，控制传输矩阵的稀疏程度
+  ot_epsilon: 0.1
+  
+  # 3. In-Context Learning 的示例数量 (Shots)
+  k_shot: 4
+  
+  # 缓存目录: 存储计算好的 OT 检索索引，避免重复计算
+  cache_dir: "./cache_ot"
 
-method:
-  name: "alignment"        # 对应 ProcessorFactory 的 key
-  params:
-    target_dim: 4096       # Llama hidden size
-    source_dim: 512        # UniMol dim
-    method_type: "random_ot" # original ICRL: Random Projection + OT
+  # --- Prompt Engineering ---
+  # 指向原仓库风格的 Prompt 模板文件 (.txt)
+  # 文件内容应类似于: "Question: {input}\nAnswer:"
+  prompt_file: "prompts/ESOL_prompt_msr_1_guided.txt"
+  
+  # 模型最大序列长度 (包含 System Prompt + ICL Examples + Question)
+  max_length: 1024
 
-llm:
-  model_path: "meta-llama/Meta-Llama-3.1-8B-Instruct"
-  # 模板中 <REP> 会被替换为 Embedding
-  prompt_template: "Question: What is the solubility of molecule <REP>?\nAnswer:"
+# ----------------------------------------------------------------------------
+# Training Arguments (HuggingFace Trainer)
+# ----------------------------------------------------------------------------
+training:
+  output_dir: "./checkpoints/spectral_esol_run1"
+  per_device_train_batch_size: 4
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 4
+  learning_rate: 1e-4
+  num_train_epochs: 10
+  logging_steps: 10
+  save_strategy: "epoch"
+  evaluation_strategy: "epoch"
+  remove_unused_columns: false # 必须为 false，否则 feature_embeds 会被 Trainer 过滤掉！
+  dataloader_num_workers: 4

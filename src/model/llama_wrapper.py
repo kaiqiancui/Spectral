@@ -1,117 +1,111 @@
 import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from src.model.components import build_projector
 
 class LlamaWrapper(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.cfg = config
-        model_path = config.llm.model_path
+        self.config = config
         
-        print(f"🤖 Loading LLM: {model_path}...")
+        # 1. 加载基础 LLM
+        print(f"Loading Llama model from {config.model_name_or_path}...")
         self.llm = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            device_map=config.experiment.device,
-            torch_dtype=torch.float16,
-            trust_remote_code=True
+            config.model_name_or_path,
+            torch_dtype=torch.bfloat16 if config.get("use_bf16", True) else torch.float16,
+            device_map="auto"
         )
-        self.tokenizer = AutoTokenizer.from_pretrained(model_path)
-        self.tokenizer.pad_token = self.tokenizer.eos_token
-        self.tokenizer.padding_side = "left"
         
-        # 1. 定义占位符 Token (用于定位 Embedding 插入点)
-        # 我们使用 <REP> 作为通用占位符
-        self.rep_token = "<REP>"
-        if self.rep_token not in self.tokenizer.get_vocab():
-            self.tokenizer.add_tokens([self.rep_token], special_tokens=True)
-            self.llm.resize_token_embeddings(len(self.tokenizer))
-        self.rep_token_id = self.tokenizer.convert_tokens_to_ids(self.rep_token)
-        
-        # 2. 加载 Prompt 模板
-        # 示例 Template: "Question: What is the property of <REP>? Answer:"
-        self.prompt_template = config.llm.get("prompt_template", "Input: <REP>\nOutput:")
+        # 2. 初始化 Projector
+        # 注意：Projector 需要放到与 LLM 相同的设备上，或者在 forward 时处理
+        self.projector = build_projector(config)
+        self.projector.to(self.llm.device).to(self.llm.dtype)
 
-    def _build_prompt_text(self, text_data):
-        """
-        根据 Config 的模板构建文本 Prompt
-        text_data: 包含 'input1', 'input2' 等原始文本的字典
-        """
-        prompt = self.prompt_template
-        
-        # 简单替换：如果模板里有 <INPUT> 之类的标签，可以用 text_data 替换
-        # 这里假设模板主要是为了安放 <REP>
-        # 如果是 DTI 任务，模板可能是 "Drug: <REP> Target: <REP> ..."
-        # LlamaWrapper 不需要知道是 Drug 还是 Target，它只负责看到一个 <REP> 就准备填一个向量
-        return prompt
+        # 冻结 LLM 参数 (如果只需要训练 Projector)
+        if config.get("freeze_llm", True):
+            print("Freezing LLM parameters...")
+            for param in self.llm.parameters():
+                param.requires_grad = False
+            # Projector 必须可训练
+            for param in self.projector.parameters():
+                param.requires_grad = True
 
-    def forward(self, batch):
-        # 仅用于训练或调试，通常我们用 generate
-        pass
+    def get_input_embeddings(self):
+        return self.llm.get_input_embeddings()
 
-    @torch.inference_mode()
-    def generate(self, batch):
+    def forward(
+        self, 
+        input_ids=None, 
+        attention_mask=None, 
+        feature_embeds=None, 
+        labels=None, 
+        **kwargs
+    ):
         """
-        执行推理
-        batch: DataLoader yield 出的字典
+        Args:
+            input_ids: [Batch, Seq_Len] 文本输入的 Token IDs
+            attention_mask: [Batch, Seq_Len] 文本的 Mask
+            feature_embeds: [Batch, Feature_Dim] 原始的科学特征 (UniMol/ESM)
+            labels: [Batch, Seq_Len] 标签，用于计算 Loss
         """
-        device = self.llm.device
-        batch_size = len(batch['input1']) # 假设 batch 包含 input1, input1_emb 等
         
-        # 1. 构建纯文本 Prompt List
-        prompts = [self._build_prompt_text(None) for _ in range(batch_size)]
+        # 1. 获取文本的 Embedding [Batch, Seq_Len, Hidden_Dim]
+        text_embeds = self.get_input_embeddings()(input_ids)
         
-        # 2. Tokenize
-        inputs = self.tokenizer(prompts, return_tensors="pt", padding=True, truncation=True).to(device)
-        input_ids = inputs.input_ids
-        attention_mask = inputs.attention_mask
-        
-        # 3. 获取 LLM 原始 Embedding
-        inputs_embeds = self.llm.get_input_embeddings()(input_ids)
-        
-        # 4. [核心] 替换 Embedding
-        # 找到 input_ids 中等于 <REP> 的位置，替换为 batch 中的 embedding
-        # 注意：这里假设 batch['input1_emb'] 已经是 [Batch, Hidden_Dim] (即投影后的)
-        
-        # 简单实现：假设每个 Prompt 只有一个 <REP>，且我们用 input1_emb 替换
-        # 如果是双模态，需要更复杂的逻辑 (按顺序替换)
-        
-        rep_mask = (input_ids == self.rep_token_id)
-        
-        # 检查 batch 中有哪些 embedding
-        # 我们的 Loader 产生了 input1_emb, input2_emb ...
-        embeddings_to_insert = []
-        if 'input1_emb' in batch:
-            embeddings_to_insert.append(batch['input1_emb'].to(device).to(inputs_embeds.dtype))
-        if 'input2_emb' in batch:
-            embeddings_to_insert.append(batch['input2_emb'].to(device).to(inputs_embeds.dtype))
+        # 2. 处理科学特征
+        if feature_embeds is not None:
+            # 确保类型匹配
+            feature_embeds = feature_embeds.to(text_embeds.dtype).to(text_embeds.device)
             
-        # 这里的逻辑是将所有 embedding 拼起来还是分别替换？
-        # 为了兼容原代码逻辑，通常是一个样本对应一个向量序列。
-        # 如果是单模态，insert_emb 就是 [Batch, 1, 4096]
-        
-        if len(embeddings_to_insert) > 0:
-            # 拼接多模态 (如果需要) 或者只取第一个
-            # 简化起见：我们假设 batch['input1_emb'] 是主要的
-            insert_emb = embeddings_to_insert[0] 
+            # 投影: [Batch, Feature_Dim] -> [Batch, LLM_Dim]
+            # 如果 feature_embeds 是 [Batch, Dim]，我们需要 unsqueeze 成 [Batch, 1, Dim]
+            if len(feature_embeds.shape) == 2:
+                feature_embeds = feature_embeds.unsqueeze(1)
             
-            # 确保维度匹配: [Batch, Seq_Len, Hidden]
-            if insert_emb.dim() == 2:
-                insert_emb = insert_emb.unsqueeze(1) # [Batch, 1, 4096]
+            projected_embeds = self.projector(feature_embeds) # [Batch, 1, LLM_Dim]
             
-            # 执行替换 (Scatter)
-            # 注意：这要求 <REP> 的数量和 insert_emb 的序列长度一致
-            # 这里做一个简化的假设：每个样本只替换一个位置
-            inputs_embeds[rep_mask] = insert_emb.squeeze(1)
+            # 3. 拼接 Embedding: [Science, Text]
+            inputs_embeds = torch.cat([projected_embeds, text_embeds], dim=1)
+            
+            # 4. 扩展 Attention Mask
+            # 文本的 Mask 是 [1, 1, 0, ...]，我们需要在前面加一个 1 给科学特征
+            if attention_mask is not None:
+                # 创建一个全 1 的列: [Batch, 1]
+                feature_mask = torch.ones(
+                    (attention_mask.shape[0], projected_embeds.shape[1]), 
+                    dtype=attention_mask.dtype, 
+                    device=attention_mask.device
+                )
+                attention_mask = torch.cat([feature_mask, attention_mask], dim=1)
+            
+            # 5. 扩展 Labels (如果存在)
+            # 科学特征部分不应该计算 Loss，所以 Label 填充 -100 (Ignore Index)
+            if labels is not None:
+                feature_labels = torch.full(
+                    (labels.shape[0], projected_embeds.shape[1]), 
+                    -100, 
+                    dtype=labels.dtype, 
+                    device=labels.device
+                )
+                labels = torch.cat([feature_labels, labels], dim=1)
+                
+        else:
+            inputs_embeds = text_embeds
 
-        # 5. Generate
-        outputs = self.llm.generate(
+        # 6. 调用 LLM
+        # 注意：这里我们传入 inputs_embeds，而不是 input_ids
+        outputs = self.llm(
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
-            max_new_tokens=20,
-            pad_token_id=self.tokenizer.eos_token_id,
-            do_sample=False
+            labels=labels,
+            return_dict=True,
+            **kwargs
         )
         
-        # 6. Decode
-        decoded = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
-        return decoded
+        return outputs
+
+    # 为了兼容 HuggingFace Trainer 的 save_pretrained
+    def save_pretrained(self, save_directory):
+        self.llm.save_pretrained(save_directory)
+        # 还需要单独保存 projector，或者将其作为模块保存
+        torch.save(self.projector.state_dict(), f"{save_directory}/projector.pt")

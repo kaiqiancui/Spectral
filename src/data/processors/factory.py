@@ -1,7 +1,7 @@
 from .spectral import SpectralProcessor
-from .alignment import AlignmentProcessor
+from .legacy import PCAOTProcessor
 
-class ProcessorFactory:
+class ProcessorFactory
     @staticmethod
     def get_processor(cfg):
         method = cfg.method.name
@@ -11,6 +11,6 @@ class ProcessorFactory:
             return SpectralProcessor(cfg)
         elif method == "alignment":
             # 这是原论文的 Baseline 逻辑
-            return AlignmentProcessor(cfg)
+            return PCAOTProcessor(cfg)
         else:
             raise ValueError(f"Unknown method: {method}")
