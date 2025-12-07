@@ -1,0 +1,27 @@
+experiment:
+  name: "spectral_esol"
+  device: "cuda"
+  save_dir: "./logs/baseline"
+
+data:
+  task_name: "ESOL"
+  modality_type: "single"  # single (分子/蛋白) 或 dual (DTI)
+  # 定义每列数据对应的编码器和缓存文件
+  inputs:
+    - column: "input1"     # 对应 task 返回字典的 key
+      encoder: "unimol"
+      cache_path: "./data/cache/unimol_esol.pkl"
+
+method:
+  name: "spectral"         # 切换方法
+  params:
+    target_dim: 4096
+    reorder: true          # Spectral 特有参数
+    add_residual: true     # Spectral 特有参数
+    align_stats:           # 对齐参数
+      mean: 0.0
+      std: 0.02
+llm:
+  model_path: "meta-llama/Meta-Llama-3.1-8B-Instruct"
+  # 模板中 <REP> 会被替换为 Embedding
+  prompt_template: "Question: What is the solubility of molecule <REP>?\nAnswer:"
