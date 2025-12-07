@@ -59,17 +59,19 @@ class LlamaWrapper(nn.Module):
         return (embs - mu_x) / std_x * std_tgt + mu_tgt
 
     def _build_prompt(self, text, label=None, is_shot=False):
-        # Llama-3.1 标准格式
-        user_content = (
-            f"Question: What is the value?\n"
-            f"Representation: {self.rep_token}\n"
-            f"Sequence: {text[:20]}..."
-        )
-        prompt = f"<|start_header_id|>user<|end_header_id|>\n\n{user_content}<|eot_id|>"
-        prompt += f"<|start_header_id|>assistant<|end_header_id|>\n\n"
+        # 读取 Config 中的模板，而不是硬编码
+        # 假设模板是: "The molecule is <REP>. Property is:"
+        template = self.cfg.llm.prompt_template 
         
-        if is_shot and label is not None:
-            prompt += f"{label:.3f}<|eot_id|>"
+        # 替换 <REP> 占位符
+        prompt = template.replace("<REP>", self.rep_token)
+        prompt = prompt.replace("<SMILES>", text) # 如果模板里有原文占位符
+        
+        if is_shot:
+            prompt += f" {label:.3f}\n" # Shot 结尾加 Label
+        else:
+            prompt += "" # Query 结尾留空让 LLM 续写
+            
         return prompt
 
     @torch.inference_mode()
