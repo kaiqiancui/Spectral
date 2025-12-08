@@ -29,80 +29,53 @@ class LlamaWrapper(nn.Module):
             # Projector 必须可训练
             for param in self.projector.parameters():
                 param.requires_grad = True
+        special_tokens = {"additional_special_tokens": ["<|feature|>"]}
+        tokenizer.add_special_tokens(special_tokens)
+        model.resize_token_embeddings(len(tokenizer))
+        feature_token_id = tokenizer.convert_tokens_to_ids("<|feature|>")
+        
 
     def get_input_embeddings(self):
         return self.llm.get_input_embeddings()
 
-    def forward(
-        self, 
-        input_ids=None, 
-        attention_mask=None, 
-        feature_embeds=None, 
-        labels=None, 
-        **kwargs
-    ):
-        """
-        Args:
-            input_ids: [Batch, Seq_Len] 文本输入的 Token IDs
-            attention_mask: [Batch, Seq_Len] 文本的 Mask
-            feature_embeds: [Batch, Feature_Dim] 原始的科学特征 (UniMol/ESM)
-            labels: [Batch, Seq_Len] 标签，用于计算 Loss
-        """
+    def forward(self, input_ids, feature_embeds, attention_mask=None, **kwargs):
+        # 1. 获取文本 Embedding [Batch, Seq_Len, Hidden_Dim]
+        inputs_embeds = self.llm.get_input_embeddings()(input_ids)
         
-        # 1. 获取文本的 Embedding [Batch, Seq_Len, Hidden_Dim]
-        text_embeds = self.get_input_embeddings()(input_ids)
-        
-        # 2. 处理科学特征
-        if feature_embeds is not None:
-            # 确保类型匹配
-            feature_embeds = feature_embeds.to(text_embeds.dtype).to(text_embeds.device)
-            
-            # 投影: [Batch, Feature_Dim] -> [Batch, LLM_Dim]
-            # 如果 feature_embeds 是 [Batch, Dim]，我们需要 unsqueeze 成 [Batch, 1, Dim]
-            if len(feature_embeds.shape) == 2:
-                feature_embeds = feature_embeds.unsqueeze(1)
-            
-            projected_embeds = self.projector(feature_embeds) # [Batch, 1, LLM_Dim]
-            
-            # 3. 拼接 Embedding: [Science, Text]
-            inputs_embeds = torch.cat([projected_embeds, text_embeds], dim=1)
-            
-            # 4. 扩展 Attention Mask
-            # 文本的 Mask 是 [1, 1, 0, ...]，我们需要在前面加一个 1 给科学特征
-            if attention_mask is not None:
-                # 创建一个全 1 的列: [Batch, 1]
-                feature_mask = torch.ones(
-                    (attention_mask.shape[0], projected_embeds.shape[1]), 
-                    dtype=attention_mask.dtype, 
-                    device=attention_mask.device
-                )
-                attention_mask = torch.cat([feature_mask, attention_mask], dim=1)
-            
-            # 5. 扩展 Labels (如果存在)
-            # 科学特征部分不应该计算 Loss，所以 Label 填充 -100 (Ignore Index)
-            if labels is not None:
-                feature_labels = torch.full(
-                    (labels.shape[0], projected_embeds.shape[1]), 
-                    -100, 
-                    dtype=labels.dtype, 
-                    device=labels.device
-                )
-                labels = torch.cat([feature_labels, labels], dim=1)
-                
-        else:
-            inputs_embeds = text_embeds
+        # 2. 投影特征 [Batch, N_features, Feature_Dim] -> [Batch, N_features, Hidden_Dim]
+        # 注意：这里的 feature_embeds 包含了一个样本中所有的 shot 特征 + test 特征
+        projected_features = self.projector(feature_embeds)
 
-        # 6. 调用 LLM
-        # 注意：这里我们传入 inputs_embeds，而不是 input_ids
-        outputs = self.llm(
+        # 3. 核心：替换逻辑 (Replacement)
+        # 找到 input_ids 中所有 <|feature|> 的位置
+        feature_mask = (input_ids == self.feature_token_id)
+        
+        # 校验：确保文本里的占位符数量 和 传入的特征数量一致 (Debug用)
+        # batch_size = input_ids.shape[0]
+        # assert feature_mask.sum() == projected_features.shape[0] * projected_features.shape[1]
+
+        # 执行替换
+        # inputs_embeds[mask] 会返回对应位置的向量，我们需要把 projected_features 填进去
+        # 注意：projected_features 需要展平以匹配 mask 的非零元素顺序
+        # [Batch, N_features, Hidden] -> [Batch * N_features, Hidden] (如果 batch>1 需要小心顺序)
+        
+        # 更加鲁棒的写法：
+        if feature_mask.any():
+            # 确保 projected_features 的总数匹配 mask 的总数
+            target_dtype = inputs_embeds.dtype
+            
+            # 将 projected_features 展平为 [Total_Features_In_Batch, Hidden_Dim]
+            flat_features = projected_features.view(-1, projected_features.shape[-1]).to(target_dtype)
+            
+            # 这里的赋值是按内存顺序进行的，只要 Dataset 构建时顺序一致即可
+            inputs_embeds[feature_mask] = flat_features
+
+        # 4. 调用 LLM
+        return self.llm(
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
-            labels=labels,
-            return_dict=True,
             **kwargs
         )
-        
-        return outputs
 
     # 为了兼容 HuggingFace Trainer 的 save_pretrained
     def save_pretrained(self, save_directory):

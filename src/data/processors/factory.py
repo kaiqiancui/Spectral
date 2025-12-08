@@ -1,7 +1,7 @@
 from .spectral import SpectralProcessor
 from .legacy import PCAOTProcessor
 
-class ProcessorFactory
+class ProcessorFactory:
     @staticmethod
     def get_processor(cfg):
         method = cfg.method.name
