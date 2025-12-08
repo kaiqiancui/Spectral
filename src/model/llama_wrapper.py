@@ -39,36 +39,39 @@ class LlamaWrapper(nn.Module):
         return self.llm.get_input_embeddings()
 
     def forward(self, input_ids, feature_embeds, attention_mask=None, **kwargs):
-        # 1. 获取文本 Embedding [Batch, Seq_Len, Hidden_Dim]
+        # 1. 基础 Embedding
         inputs_embeds = self.llm.get_input_embeddings()(input_ids)
         
-        # 2. 投影特征 [Batch, N_features, Feature_Dim] -> [Batch, N_features, Hidden_Dim]
-        # 注意：这里的 feature_embeds 包含了一个样本中所有的 shot 特征 + test 特征
-        projected_features = self.projector(feature_embeds)
-
-        # 3. 核心：替换逻辑 (Replacement)
-        # 找到 input_ids 中所有 <|feature|> 的位置
-        feature_mask = (input_ids == self.feature_token_id)
+        # 2. 投影特征
+        # feature_embeds shape: [Batch, N_shots+1, Science_Dim]
+        projected_features = self.projector(feature_embeds) # -> [Batch, N_shots+1, LLM_Dim]
         
-        # 校验：确保文本里的占位符数量 和 传入的特征数量一致 (Debug用)
-        # batch_size = input_ids.shape[0]
-        # assert feature_mask.sum() == projected_features.shape[0] * projected_features.shape[1]
-
-        # 执行替换
-        # inputs_embeds[mask] 会返回对应位置的向量，我们需要把 projected_features 填进去
-        # 注意：projected_features 需要展平以匹配 mask 的非零元素顺序
-        # [Batch, N_features, Hidden] -> [Batch * N_features, Hidden] (如果 batch>1 需要小心顺序)
+        # 3. 核心修正：物理拼接注入 (复刻原仓库逻辑)
+        # 假设 input_ids 中包含特殊的 placeholder token (例如 id=128256 对应 <|feature|>)
+        # 我们需要把 inputs_embeds 在这个位置切开，塞入 projected_features
         
-        # 更加鲁棒的写法：
-        if feature_mask.any():
-            # 确保 projected_features 的总数匹配 mask 的总数
-            target_dtype = inputs_embeds.dtype
+        batch_size = inputs_embeds.shape[0]
+        new_embeds_list = []
+        new_attn_mask_list = [] # 如果你需要处理 attention mask
+        
+        # 原仓库逻辑简化版：
+        for b in range(batch_size):
+            # 找到占位符的位置
+            placeholder_mask = (input_ids[b] == self.feature_token_id)
+            # 获取非占位符的文本 embedding 片段
+            # 这里需要非常精细的操作：split -> cat (feature) -> split -> cat
+            # 为了简化实现且保证稳健，建议在 Dataset 层就不要把 feature 变成 token id
+            # 而是直接传 list of embeddings 和 list of text parts。
             
-            # 将 projected_features 展平为 [Total_Features_In_Batch, Hidden_Dim]
-            flat_features = projected_features.view(-1, projected_features.shape[-1]).to(target_dtype)
+            # 但为了兼容目前的架构，我们使用替换法，但必须确保 projected_features 
+            # 的形状 [Batch, N, Dim] 能被正确 reshape 进 inputs_embeds
             
-            # 这里的赋值是按内存顺序进行的，只要 Dataset 构建时顺序一致即可
-            inputs_embeds[feature_mask] = flat_features
+            if placeholder_mask.sum() != projected_features.shape[1]:
+                 raise ValueError(f"Prompt 中的占位符数量 ({placeholder_mask.sum()}) 与 特征数量 ({projected_features.shape[1]}) 不匹配！")
+            
+            # 使用 Mask 赋值 (前提：Projector 输出是 [Batch, N_features, LLM_Dim])
+            # 并且 input_ids 里每个特征只占 1 个 token
+            inputs_embeds[b][placeholder_mask] = projected_features[b].to(inputs_embeds.dtype)
 
         # 4. 调用 LLM
         return self.llm(
@@ -76,7 +79,6 @@ class LlamaWrapper(nn.Module):
             attention_mask=attention_mask,
             **kwargs
         )
-
     # 为了兼容 HuggingFace Trainer 的 save_pretrained
     def save_pretrained(self, save_directory):
         self.llm.save_pretrained(save_directory)

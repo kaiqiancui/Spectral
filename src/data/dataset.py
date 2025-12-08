@@ -50,3 +50,25 @@ class ICRLDataset(Dataset):
             "attention_mask": inputs.attention_mask[0],
             "feature_embeds": features # 这里的 features 包含了 shots 和 test 的所有特征
         }
+    def sample_shots(self, n_shots):
+        """
+        复刻原仓库 utils.py -> stratified_sample 逻辑
+        """
+        if self.config.sampling_strategy == "stratified":
+            # 假设 memory_bank 已经按 label 排好序了
+            total_candidates = len(self.memory_bank['labels'])
+            
+            # 计算间隔
+            indices = np.linspace(0, total_candidates - 1, n_shots, dtype=int)
+            
+            shots = []
+            for idx in indices:
+                shots.append({
+                    'feature_emb': self.memory_bank['features'][idx],
+                    'label': self.memory_bank['labels'][idx],
+                    'input_text': self.memory_bank['text'][idx]
+                })
+            return shots
+        else:
+            # 随机采样
+            # ...
