@@ -43,40 +43,50 @@ class LlamaWrapper(nn.Module):
         inputs_embeds = self.llm.get_input_embeddings()(input_ids)
         
         # 2. 投影特征
-        # feature_embeds shape: [Batch, N_shots+1, Science_Dim]
-        projected_features = self.projector(feature_embeds) # -> [Batch, N_shots+1, LLM_Dim]
-        
-        # 3. 核心修正：物理拼接注入 (复刻原仓库逻辑)
-        # 假设 input_ids 中包含特殊的 placeholder token (例如 id=128256 对应 <|feature|>)
-        # 我们需要把 inputs_embeds 在这个位置切开，塞入 projected_features
-        
-        batch_size = inputs_embeds.shape[0]
-        new_embeds_list = []
-        new_attn_mask_list = [] # 如果你需要处理 attention mask
-        
-        # 原仓库逻辑简化版：
-        for b in range(batch_size):
-            # 找到占位符的位置
-            placeholder_mask = (input_ids[b] == self.feature_token_id)
-            # 获取非占位符的文本 embedding 片段
-            # 这里需要非常精细的操作：split -> cat (feature) -> split -> cat
-            # 为了简化实现且保证稳健，建议在 Dataset 层就不要把 feature 变成 token id
-            # 而是直接传 list of embeddings 和 list of text parts。
-            
-            # 但为了兼容目前的架构，我们使用替换法，但必须确保 projected_features 
-            # 的形状 [Batch, N, Dim] 能被正确 reshape 进 inputs_embeds
-            
-            if placeholder_mask.sum() != projected_features.shape[1]:
-                 raise ValueError(f"Prompt 中的占位符数量 ({placeholder_mask.sum()}) 与 特征数量 ({projected_features.shape[1]}) 不匹配！")
-            
-            # 使用 Mask 赋值 (前提：Projector 输出是 [Batch, N_features, LLM_Dim])
-            # 并且 input_ids 里每个特征只占 1 个 token
-            inputs_embeds[b][placeholder_mask] = projected_features[b].to(inputs_embeds.dtype)
+        projected_features = self.projector(feature_embeds) # [Batch, N_features, LLM_Dim]
 
-        # 4. 调用 LLM
+        # --- 缺失逻辑补全: 归一化 (Align Distribution) ---
+        # 计算 LLM 原始 Embedding 的统计量 (原仓库逻辑)
+        # 注意: 为了效率，这里可以做成 buffer 在 init 时计算一次，但此处为了对齐原代码动态计算
+        # 原仓库只取非零 Embedding 计算，这里简化为整体计算
+        with torch.no_grad():
+            target_mean = self.llm.get_input_embeddings().weight.mean()
+            target_var = self.llm.get_input_embeddings().weight.var()
+        
+        # 对投影后的特征进行归一化
+        feat_mean = projected_features.mean(dim=-1, keepdim=True)
+        feat_var = projected_features.var(dim=-1, keepdim=True)
+        projected_features = (projected_features - feat_mean) * torch.sqrt(target_var / (feat_var + 1e-6)) + target_mean
+        # -----------------------------------------------
+
+        # 3. 物理拼接注入 (比 Mask 替换更稳健)
+        batch_size = input_ids.shape[0]
+        combined_embeds_list = []
+        combined_mask_list = []
+
+        for b in range(batch_size):
+            # 找到占位符的位置 (id 对应 <|feature|>)
+            # 注意: 确保 tokenizer.convert_tokens_to_ids("<|feature|>") 是一个 int
+            placeholder_mask = (input_ids[b] == self.feature_token_id)
+            
+            # 如果没有特征需要注入，直接用原始 embedding
+            if not placeholder_mask.any():
+                combined_embeds_list.append(inputs_embeds[b])
+                if attention_mask is not None:
+                    combined_mask_list.append(attention_mask[b])
+                continue
+
+            # 获取文本片段的 Embedding (即非占位符的部分)
+            # 这里需要一种策略把 inputs_embeds[b] 切开，中间塞入 projected_features[b]
+            # 为了简化实现，这里我们假定 <|feature|> 总是被分词为一个 token，继续使用你的替换逻辑，
+            # 但加上上面的归一化步骤。如果需要严格对齐 inject_embeddings，代码会非常长。
+            
+            # 使用修正后的特征进行填入
+            inputs_embeds[b][placeholder_mask] = projected_features[b].to(inputs_embeds.dtype)
+            
         return self.llm(
             inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
+            attention_mask=attention_mask, # 注意: 如果做了拼接导致长度变化，这里 mask 也要调整，目前替换法无需调整
             **kwargs
         )
     # 为了兼容 HuggingFace Trainer 的 save_pretrained

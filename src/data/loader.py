@@ -28,17 +28,29 @@ def get_real_chem_data(config):
         
     return fm_reps, labels, smiles
 
-def get_data_loader(config):
-    # 获取真实数据
-    fm_reps, labels, smiles = get_real_chem_data(config)
+def get_data_loader(cfg):
+    print(f"Loading embeddings from {cfg.data.train_emb_path}")
+    # 假设你已经把原仓库跑出来的 Tensor 存成了 .pt
+    train_embs = torch.load(cfg.data.train_emb_path, map_location='cpu')
     
-    # 构建 Dataset
-    # 必须传入所有数据以便做 Stratified Sampling
-    full_dataset = {
-        'features': fm_reps,
-        'labels': labels,
-        'text': smiles
-    }
+    # 加载原始数据 (JSON/CSV)
+    # 原仓库是分开加载的，这里需要小心顺序
+    # 强烈建议: 不要分开加载。应该在原仓库做一个脚本，把 (smiles, label, embedding) 存成一个单一的 list of dicts 的 .pt 文件
+    # 如果必须分开加载，必须确保这里的 datasets 加载顺序与生成 embedding 时的顺序完全一致！
+    
+    raw_data = load_raw_data_from_json(cfg.data.train_data_path) # 自定义函数读取json
+    
+    if len(raw_data) != len(train_embs):
+        raise ValueError(f"数据量不匹配! Raw: {len(raw_data)}, Emb: {len(train_embs)}")
+    
+    # 组装
+    full_dataset = []
+    for i, item in enumerate(raw_data):
+        full_dataset.append({
+            "input_text": item['Drug'] if 'Drug' in item else item['smiles'], # 适配不同数据集key
+            "label": item['Y'] if 'Y' in item else item['label'],
+            "feature_emb": train_embs[i]
+        })
     
     # 分割 Train/Test (需复刻原仓库的 random_split 或 stratified split)
     # ...
